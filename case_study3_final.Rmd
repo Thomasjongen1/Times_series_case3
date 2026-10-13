@@ -1,0 +1,675 @@
+---
+title: "case_study 3"
+output: html_notebook
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r}
+# Importing packages
+library(quantmod) # To access yfinance
+library(bootUR) # For adf
+library(forecast) # For ARIMA models, Acf and Pacf
+library(vars) # For the VAR
+library(zoo)
+```
+
+```{r}
+# Data loading
+jpm_data <- getSymbols('JPM', src='yahoo', from = "2005-01-01", to = "2025-12-31", auto.assign = FALSE)
+```
+
+We choose the period 1st of January 2005 to 31st of December 2025 to
+obtain 20 years of daily data (approx 5040 (252 \*20) observations)
+covering several significant structural breaks (2008 bank crisis, 2020
+Covid-19).
+
+# Data Exploration
+
+```{r}
+jpm_adj <- Ad(jpm_data) # Use adjusted close data as the price.
+```
+
+```{r}
+plot(jpm_adj, main = "JPM Adjusted Close Price (2005-2025)", col = "navy", major.ticks = "years")
+```
+
+By observing the plot of the Adj-Close time series we can probably see
+that it is non-stationary. It clearly has an upwards trend.
+
+```{r}
+crises <- list(
+  "2008 Financial Crisis" = c(start = "2008-01-01", end = "2009-12-31"),
+  "2020 COVID Shock"     = c(start = "2020-01-01", end = "2020-12-31")
+)
+
+for (name in names(crises)) {
+  date_range <- paste(crises[[name]]["start"], crises[[name]]["end"], sep = "/")
+
+  crisis_subset <- jpm_adj[date_range]
+  
+  print(plot(crisis_subset, 
+       main = paste("JPM Stock Price:", name), 
+       col = "darkred", 
+       major.ticks = "months",
+       grid.ticks.on = "months"))
+}
+```
+
+For structural breaks, we notice a small dip during the 2008 financial
+crisis. We can also find dips during the 2020 Covid-19 Pandemic.
+
+# Unit Root Tests
+
+We use the ADF test for the Pantula Principle. The Pantula principle
+requires us to set a dmax, in this case it is sensible to choose dmax =
+2. We will perform ADF tests for series differentiated dmax-times until
+0 or until we fail to reject the null hypothesis of the ADF test that
+the series is non-stationary (has unit root) and is I(d + 1).
+
+```{r}
+jpm_price <- na.omit(jpm_adj)
+```
+
+```{r}
+diff2_jpm <- diff(jpm_price, differences = 2)[-c(1, 2)]
+adf_d2 <- boot_adf(diff2_jpm, deterministics = "none")
+adf_d2
+```
+
+For d = 2, we reject the null-hypothesis, thus the 2-times
+differentiated series is stationary.
+
+```{r}
+diff1_jpm <- diff(jpm_price, differences = 1)[-1]
+adf_d1 <- boot_adf(diff1_jpm, deterministics = "intercept")
+adf_d1
+```
+
+We continue to d = 1, we also reject the H0, and thus, the 1-time
+differentiated series is stationary.
+
+```{r}
+adf_d0 <- boot_adf(jpm_price, deterministics = "trend")
+adf_d0
+```
+
+Finally, for d = 0, we fail to reject the H0 and thus the adjusted close
+series is non-stationary because it has a unit root.
+
+From this we can conclude that the series is I(1).
+
+```{r}
+plot(diff1_jpm, col = "darkblue")
+```
+
+# ARIMA Models for the Price Series
+
+```{r}
+jpm_price <- na.omit(jpm_adj)
+
+diff_jpm <- diff(jpm_price)[-1]
+```
+
+We know the price series is I(1) se we now use the first differences
+series
+
+```{r}
+par(mfrow = c(1, 2))
+Acf(diff_jpm, main = "ACF of First Differences (ΔY_t)")
+Pacf(diff_jpm, main = "PACF of First Differences (ΔY_t)")
+par(mfrow = c(1, 1))
+```
+
+```{r}
+fit_arima111 <- Arima(jpm_price, order = c(1, 1, 1), include.drift = TRUE)
+fit_arima212 <- Arima(jpm_price, order = c(2, 1, 2), include.drift = TRUE)
+fit_arima010 <- Arima(jpm_price, order = c(0, 1, 0), include.drift = TRUE)
+```
+
+Standard R functions like stats::arima() only allow a drift term when d
+= 0. The forecast::Arima() allows inclusion of a constant term c when we
+differentiatie once. And since we know our series is I(1) we need to use
+the forecast package.
+
+```{r}
+aicc_table <- data.frame(
+  Model = c("ARIMA(0,1,0) with drift", "ARIMA(1,1,1) with drift", "ARIMA(2,1,2) with drift"),
+  AICc  = c(fit_arima010$aicc, fit_arima111$aicc, fit_arima212$aicc)
+)
+print(aicc_table)
+```
+
+We choose as the best model the one with the lowest AICc, which is
+ARIMA(2, 1, 2).
+
+```{r}
+auto_fit <- auto.arima(
+  jpm_price,
+  d = 1,                   # We know its I(1)
+  max.p = 5,               # Set max search bounds
+  max.q = 5, 
+  stepwise = TRUE,         # Uses Hyndman-Khandakar stepwise algorithm
+  approximation = FALSE,
+  ic = "aicc"              # Selects model based on Corrected AIC
+)
+
+summary(auto_fit)
+```
+
+An ARIMA(4, 1, 2) is selected as the optimal model, it achieves an AICc
+of 19785.51, which is lower than the one we achieved using our
+hard-coded models.
+
+# From prices to Returns
+
+We will use log-returns, the reasons for this decision are: -
+Log-returns are linearly additive over time, while simple returns must
+be compounded through multiplication. - When price series are long, raw
+prices increase rapidly, simple returns can suffer from big variance
+differences, while log returns scale variance and return more stationary
+variance properties.
+
+```{r}
+jpm_returns <- na.omit(diff(log(jpm_adj)))
+
+plot(jpm_returns, main = "JPM Daily Log Returns", ylab = "Log Return")
+```
+
+The series looks stationary from visual examination
+
+```{r}
+boot_adf(jpm_returns, deterministics = "intercept")
+```
+
+We run the ADF test only with intercept because the mean of the log
+returns series is not exactly zero, since stock prices have an upwards
+trend. Using the ADF test we can reject the null hypothesis that the
+series has a unit root, and thus determine that our log returns are a
+stationary time series.
+
+```{r}
+par(mfrow = c(1, 2))
+Acf(jpm_returns, main = "ACF of log-returns")
+Pacf(jpm_returns, main = "PACF of log-returns")
+par(mfrow = c(1, 1))
+```
+
+```{r}
+auto_fit <- auto.arima(
+  jpm_returns,
+  d = 0,                   # We know log returns are stationary
+  max.p = 5,               # Set max search bounds
+  max.q = 5, 
+  stepwise = TRUE,
+  approximation = FALSE,
+  ic = "aicc"              # Selects model based on Corrected AIC
+)
+
+summary(auto_fit)
+```
+
+From the auto.arima function we select the ARIMA(3, 0, 2).
+
+# GARCH models: Modeling volatility
+
+The ARIMA models we fit above model the conditional mean of the returns,
+assuming the errors are homoskedastic, meaning they have a constant
+variance. But financial returns are well known for their volatility
+clustering: large price changes tend to be followed by more large price
+changes, and small changes tend to be followed by small changes.This
+means the variance of the errors is not constant over time, but it is
+itsef autocorrelated. Even when the returns themselves are uncorrelated.
+
+(G)ARCH models (Bollershev, 1986) shift the focus from modeling the
+conditional mean to modelling the conditional variance.
+
+The GARCH(1,1):
+
+$$r_t = \mu_t + \epsilon_t, \qquad \epsilon_t = \sigma_t z_t, \qquad z_t \overset{iid}{\sim} D(0,1)$$
+$$\sigma_t^2 = \omega + \alpha_1\epsilon_{t-1}^2 + \beta_1\sigma_{t-1}^2$$
+Today's conditional variance $\sigma_t^2$ depends on a constant
+$\omega$, yesterday's shock squared $\epsilon_{t-1}^2$, and yesterday's
+conditional variance $\sigma_{t-1}^2$. This is very similar compared to
+the ARMA model, but then applied to the squared residuals (variance)
+instead of the level of the series (mean).
+
+Stylized facts GARCH captures and ARIMA can't: (i)Volatility clustering
+(described above) (ii)Heteroskedasticity: Variance can change over time,
+no longer constant is in ARIMA models. (iii)Fat tails: Because of the
+adjusted variance at every time step, you are not forced to use a normal
+distribution for the error terms.Under a normal distribution, the
+probability of an extreme event (market crash) is calculated as really
+small. In real life, these extreme outliers happen much more frequently
+than a normal distribution predicts. (iv)Mean reverting volatility:
+After a shock, volatility eventually settles back toward a long-run
+average level. At the rate $alpha_1$ + $beta_1$.
+
+# Checking for ARCH effects:
+
+Before we implement the GARCH model, we first check whether there is
+statistical evidence for ARCH. We do this by looking at the
+autocorrelation of the squared returns. If returns themselves are close
+to white noise, but their squares are autocorrelated, there is direct
+evidence of volatility clustering.
+
+```{r}
+par(mfrow = c(1,2))
+Acf(jpm_returns^2, main = "ACF of squared log-returns")
+
+Pacf(jpm_returns^2, main= "PACF of squared log-returns")
+par(mfrow = c(1,1))
+```
+
+```{r}
+#ARCH-LM test (formal test for ARCH effects)
+library(FinTS)
+ArchTest(jpm_returns, lags = 12)
+```
+
+We reject the null hypothesis, so a GARCH model is necessary.
+
+# Estimating a GARCH(1,1) model
+
+We use the rugarch package, the standard package for GARCH models. This
+is because it supports many variance specifications and multiple error
+distributions(normal, Student-t, skewed-t, etc).
+
+```{r}
+#Garch(1,1) with a Student-t distribution for the #standardized errors. We do this to accomodate for the #fat tails observed in daily equity returns.
+#The mean equation is specified as ARMA(3,2), matching #the auto.arima selection for the return series above.
+library(rugarch)
+spec_garch11 <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
+  mean.model = list(armaOrder = c(3,2), include.mean = TRUE),
+distribution.model = "std"
+)
+fit_garch11 <- ugarchfit(spec = spec_garch11, data = jpm_returns)
+fit_garch11
+```
+
+# Interpreting the estimated model
+
+```{r}
+coef(fit_garch11)
+```
+
+Recall
+that:$$\sigma_t^2 = \omega + \alpha_1\epsilon_{t-1}^2 + \beta_1\sigma_{t-1}^2$$
+We see the small constant omega, the floor level of the variance without
+any shocks. $\alpha1 = 0.099$ ,so moderate reaction to new shocks: about
+10% of yesterday's squared shock feeds into today's variance.
+$\beta1 = 0.893$ , so this means today's variance carries forward
+roughly 89% of yesterday's conditional variance.
+$\alpha1 + \beta1 = 0.9915$ , which is very close to 1. This means the
+model implies stationary, but only weakly stationary. The shocks to
+volatility die out only very slowly. Shape =4.99, this is the estimated
+degrees of freedom of the Student-t distribution. A value this low is
+strong evidence of fat tails: JPM's daily returns show substantially
+more extreme outcome probability then a normal distribution would
+predict.
+
+```{r}
+plot(fit_garch11, which = 3)
+```
+
+# Diagnostics
+
+```{r}
+par(mfrow = c(1,2))
+Acf(residuals(fit_garch11, standardize = TRUE), main = "ACF of standardized residuals")
+Acf(residuals(fit_garch11, standardize = TRUE)^2, main = "ACF of squared standardized residuals")
+par(mfrow = c(1,1))
+```
+
+```{r}
+infocriteria(fit_garch11)
+```
+
+We have negative numbers here. This is because information criteria are
+built from log-likelihood. These log-likelihood uses returns, which are
+in our case small numbers with small variance. Making the information
+criteria negative. Still holds: the lower the information criteria, the
+better.
+
+# Comparing the information criteria of the student-t distribution to the normal distribution.
+
+```{r}
+spec_norm <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1,1)),
+  mean.model = list(armaOrder = c(3,2), include.mean = TRUE),
+  distribution.model = "norm"
+)
+fit_norm <- ugarchfit(spec = spec_norm, data = jpm_returns)
+
+comparison <- data.frame(
+  Model = c("GARCH(1,1), Student-t", "GARCH(1,1), Normal"),
+  AIC = c(infocriteria(fit_garch11)[1], infocriteria(fit_norm)[1]),
+  BIC = c(infocriteria(fit_garch11)[2], infocriteria(fit_norm)[2])
+)
+print(comparison)
+```
+
+We see that the difference is 0.087 for AIC and 0.086 for BIC. Since the
+lower the better, and this gap is far from negligible, this is clear
+evidence that the Student-t distribution fits the JPM returns better
+than the normal distribution. This confirms our choice of the student-t
+distribution.
+
+# HAR MODEL
+
+# Bridging the Data Gap: Realized Range
+
+We would like intraday data (5min/15min/1h), since yahoo finance can´t
+provide that we use the Parkinson’s Realized Range estimator which is:
+$$RR_t = \frac{(\ln(H_t) - \ln(L_t))^2}{4 \ln(2)}$$ Basically we need
+The daily High price and the daily Low price, instead of adjusted close.
+
+```{r}
+library(lmtest)
+library(sandwich)
+```
+
+Model formulation is as follows:
+$$RR_t = \beta_0 + \beta_d RR_{t-1} + \beta_w RR_{t-1}^{(w)} + \beta_m RR_{t-1}^{(m)} + \varepsilon_t$$
+
+```{r}
+RR <- ((log(Hi(jpm_data)) - log(Lo(jpm_data)))^2) / (4 * log(2))
+colnames(RR) <- "RR"
+
+RR_d <- Lag(RR, 1)
+RR_w <- Lag(rollmean(RR, k = 5, fill = NA, align = "right"), 1)
+RR_m <- Lag(rollmean(RR, k = 22, fill = NA, align = "right"), 1)
+
+har_range_data <- na.omit(merge(RR, RR_d, RR_w, RR_m))
+colnames(har_range_data) <- c("RR", "RR_d", "RR_w", "RR_m")
+
+har_range_model <- lm(RR ~ RR_d + RR_w + RR_m, data = har_range_data)
+
+coeftest(har_range_model, vcov = NeweyWest(har_range_model, lag = 5))
+```
+
+We use Newey-West heteroskedasticity and autocorrelation consistent
+(HAC) standard errors because standard OLS standard errors are biased
+here since financial volatility series exhibit strong autocorrelation
+and conditional heteroskedasticity.
+
+From the coefficient test we can see that the lagged daily RR is
+significant, together with the monthly RR. The weekly RR is not
+significant when daily RR is taken into account. I need to economically
+justify this!
+
+```{r}
+res <- residuals(har_range_model)
+Acf(res, main = "ACF of Residuals")
+plot(har_range_model, which = 3)
+```
+
+```{r}
+plot(RR, 
+     main = "JPM - Daily Realized Range Volatility (2005-2025)",
+     ylab = "Realized Range (RR)",
+     xlab = "Date",
+     col = "darkred",
+     lwd = 1,
+     major.ticks = "years",
+     grid.ticks.on = "years",
+     grid.col = "lightgray")
+
+# Adding a visual highlight for major economic stress periods
+addEventLines(
+  events = xts(c("2008 Crisis", "2020 COVID"), 
+               as.Date(c("2008-09-15", "2020-03-11"))),
+  col = "navy", 
+  srt = 90, 
+  pos = 2
+)
+```
+
+```{r}
+# Extract fitted values from the HAR model
+rr_fitted <- xts(fitted(har_range_model), order.by = index(har_range_data))
+
+# Merge actual RR and fitted values into an xts object
+# Note: fitted values start after the initial NA alignment from lagging
+rr_comparison <- merge(har_range_data$RR, rr_fitted)
+colnames(rr_comparison) <- c("Actual_RR", "Predicted_RR")
+
+# 1. Plot ONLY the actual series first (Background layer: muted gray line)
+plot(rr_comparison$Actual_RR, 
+     main = "Actual vs Fitted HAR Realized Range",
+     col = "gray70",                # Light gray puts actual data in the background
+     lwd = 1,
+     major.ticks = "years",
+     grid.ticks.on = "years",
+     ylab = "Realized Range")
+
+# 2. Draw the predicted series on TOP (Foreground layer: bold red line)
+lines(rr_comparison$Predicted_RR, 
+      col = "firebrick",            # Bright red brings predicted values to the front
+      lwd = 1.3)
+
+# 3. Add the legend
+addLegend(legend.loc = "topright", 
+          legend.names = c("Actual RR", "Predicted RR (HAR)"), 
+          col = c("gray70", "firebrick"), 
+          lty = c(1, 1), 
+          lwd = c(1, 1.3),
+          bg = "white")
+```
+
+# Bridging the Data Gap: Monthly Realized Variance from Daily Data
+
+Following the previous section, another option in case intraday data is
+not available is to still try to model volatility but raising the
+aggregation level to monthly. This is done by:
+$$RV_{m} = \sum_{i \in \text{month}} r_{i}^2$$ The formulated model is:
+$$RV_{m} = \beta_0 + \beta_1 RV_{m-1} + \beta_3 RV_{m-1}^{(3)} + \beta_{12} RV_{m-1}^{(12)} + \varepsilon_m$$
+
+```{r}
+rv_monthly <- apply.monthly(jpm_returns, function(x) sum(x^2, na.rm = TRUE))
+colnames(rv_monthly) <- "RV_m"
+
+RV_m1  <- Lag(rv_monthly, 1)
+RV_m3  <- Lag(rollmean(rv_monthly, k = 3, fill = NA, align = "right"), 1)
+RV_m12 <- Lag(rollmean(rv_monthly, k = 12, fill = NA, align = "right"), 1)
+
+# 4. Combine and remove NA values generated by rolling/lagging
+har_monthly_data <- na.omit(merge(rv_monthly, RV_m1, RV_m3, RV_m12))
+colnames(har_monthly_data) <- c("RV_m", "RV_m1", "RV_m3", "RV_m12")
+
+# 5. Estimate the Monthly HAR model
+har_monthly_model <- lm(RV_m ~ RV_m1 + RV_m3 + RV_m12, data = har_monthly_data)
+
+# 6. Output summary with robust standard errors
+coeftest(har_monthly_model, vcov = NeweyWest(har_monthly_model))
+```
+
+From the coefficient test we can see that the only significant
+coefficient is the medium term volatility (quarterly). This makes us
+think that the primary market predictor for a stock like JPM is the
+intermediate market memory.
+
+Issue: Aggregartion bias: Aggregating daily data to monthly realized
+variance smooths out single-month noise, shifting structural persistence
+toward quarterly trends.
+
+# A Multivariate Extension: Modeling Spillovers.
+
+```{r}
+# 1. Collect data for JPM, BAC, and MSFT (2005-2025)
+tickers <- c("JPM", "BAC", "MSFT")
+multi_data <- new.env()
+getSymbols(tickers, src = "yahoo", from = "2005-01-01", to = "2025-12-31", env = multi_data)
+
+# 2. Compute Daily Realized Range (RR) for each stock
+calc_rr <- function(xts_obj) {
+  rr <- ((log(Hi(xts_obj)) - log(Lo(xts_obj)))^2) / (4 * log(2))
+  rr[rr <= 0] <- NA
+  colnames(rr) <- "RR"
+  return(rr)
+}
+
+rr_jpm <- calc_rr(multi_data$JPM)
+rr_bac <- calc_rr(multi_data$BAC)
+rr_msft <- calc_rr(multi_data$MSFT)
+
+# 3. Construct HAR components (Daily, Weekly (5-day rolling), Monthly (22-day rolling))
+make_har_features <- function(rr_series) {
+  y <- log(rr_series)
+  d <- stats::lag(log(rr_series), 1)
+  w <- stats::lag(log(rollmean(rr_series, k = 5, fill = NA, align = "right")), 1)
+  m <- stats::lag(log(rollmean(rr_series, k = 22, fill = NA, align = "right")), 1)
+  res <- na.omit(merge(y, d, w, m))
+  colnames(res) <- c("RR", "RR_d", "RR_w", "RR_m")
+  return(res)
+}
+
+# 4. Apply your make_har_features function to each asset's Realized Range series
+har_jpm <- make_har_features(rr_jpm)
+har_bac <- make_har_features(rr_bac)
+har_msft <- make_har_features(rr_msft)
+colnames(har_jpm) <- paste0("JPM_", c("RR", "d", "w", "m"))
+colnames(har_bac) <- paste0("BAC_", c("RR", "d", "w", "m"))
+colnames(har_msft) <- paste0("MSFT_", c("RR", "d", "w", "m"))
+
+m_har_data <- na.omit(merge(har_jpm, har_bac, har_msft))
+
+# --- Equation 1: JPM M-HAR Model ---
+mhar_jpm_model <- lm(JPM_RR ~ JPM_d + JPM_w + JPM_m + 
+                              BAC_d + BAC_w + BAC_m + 
+                              MSFT_d + MSFT_w + MSFT_m, 
+                     data = m_har_data)
+
+# --- Equation 2: BAC M-HAR Model ---
+mhar_bac_model <- lm(BAC_RR ~ JPM_d + JPM_w + JPM_m + 
+                              BAC_d + BAC_w + BAC_m + 
+                              MSFT_d + MSFT_w + MSFT_m, 
+                     data = m_har_data)
+
+# --- Equation 3: MSFT M-HAR Model ---
+mhar_msft_model <- lm(MSFT_RR ~ JPM_d + JPM_w + JPM_m + 
+                               BAC_d + BAC_w + BAC_m + 
+                               MSFT_d + MSFT_w + MSFT_m, 
+                      data = m_har_data)
+```
+
+```{r}
+cat("\n=== JPM M-HAR Spillovers ===\n")
+print(coeftest(mhar_jpm_model, vcov = NeweyWest(mhar_jpm_model, lag = 5)))
+
+cat("\n=== BAC M-HAR Spillovers ===\n")
+print(coeftest(mhar_bac_model, vcov = NeweyWest(mhar_bac_model, lag = 5)))
+
+cat("\n=== MSFT M-HAR Spillovers ===\n")
+print(coeftest(mhar_msft_model, vcov = NeweyWest(mhar_msft_model, lag = 5)))
+```
+
+We see that the weekly components are the most significant ones.
+
+We see some significance of JPM to BAC and MSFT to JPM
+
+```{r}
+spill_test <- function(model, from) {
+  h <- paste0(from, c("_d", "_w", "_m"))s
+  b <- coef(model)[h]                      #Their estimates
+  V <- NeweyWest(model, lag = 5)[h,h]      #Newey-West covariance matrix
+  W <- as.numeric(t(b) %*% solve(V) %*% b) #Wald statistic
+  pchisq(W, df = length(h), lower.tail = FALSE) #p-value from chi-squared(3)
+}
+full_tests <- c(
+  "JPM -> BAC" = spill_test(mhar_bac_model, "JPM"),
+  "JPM -> MSFT" = spill_test(mhar_msft_model, "JPM"),
+  "BAC -> JPM" = spill_test(mhar_jpm_model, "BAC"),
+  "BAC -> MSFT" = spill_test(mhar_msft_model, "BAC"),
+  "MSFT -> JPM" = spill_test(mhar_jpm_model, "MSFT"),
+  "MSFT -> BAC" = spill_test(mhar_bac_model, "MSFT")
+)
+```
+
+# Subsample Analysis: Crisis versus Non-crisis Periods.
+
+```{r}
+# 1. Re-generate HAR features for the entire multi-system first
+har_jpm <- make_har_features(rr_jpm)
+har_bac <- make_har_features(rr_bac)
+har_msft <- make_har_features(rr_msft)
+
+colnames(har_jpm) <- paste0("JPM_", c("RR", "d", "w", "m"))
+colnames(har_bac) <- paste0("BAC_", c("RR", "d", "w", "m"))
+colnames(har_msft) <- paste0("MSFT_", c("RR", "d", "w", "m"))
+
+m_har_full <- na.omit(merge(har_jpm, har_bac, har_msft))
+
+# 2. Split the M-HAR dataset into Crisis and Non-Crisis subsets using window()
+crisis_data_1 <- window(m_har_full, start = "2008-01-01", end = "2009-12-31")
+crisis_data_2 <- window(m_har_full, start = "2020-01-01", end = "2020-12-31")
+m_har_crisis <- rbind(crisis_data_1, crisis_data_2)
+
+m_har_noncrisis <- window(m_har_full, start = "2011-01-01", end = "2019-12-31")
+
+# 3. Estimate M-HAR Equations for the CRISIS Period (Including MSFT)
+cat("\n================ CRISIS PERIOD M-HAR (2008 & 2020) ================\n")
+crisis_jpm <- lm(JPM_RR ~ JPM_d + JPM_w + JPM_m + BAC_d + BAC_w + BAC_m + MSFT_d + MSFT_w + MSFT_m, data = m_har_crisis)
+crisis_bac <- lm(BAC_RR ~ JPM_d + JPM_w + JPM_m + BAC_d + BAC_w + BAC_m + MSFT_d + MSFT_w + MSFT_m, data = m_har_crisis)
+crisis_msft <- lm(MSFT_RR ~ JPM_d + JPM_w + JPM_m + BAC_d + BAC_w + BAC_m + MSFT_d + MSFT_w + MSFT_m, data = m_har_crisis)
+
+print("--- JPM Crisis Spillovers ---")
+print(coeftest(crisis_jpm, vcov = NeweyWest(crisis_jpm, lag = 5)))
+
+print("--- BAC Crisis Spillovers ---")
+print(coeftest(crisis_bac, vcov = NeweyWest(crisis_bac, lag = 5)))
+
+print("--- MSFT Crisis Spillovers ---")
+print(coeftest(crisis_msft, vcov = NeweyWest(crisis_msft, lag = 5)))
+
+crisis_tests <- c(
+  "JPM -> BAC" = spill_test(crisis_bac, "JPM"),
+  "JPM -> MSFT" = spill_test(crisis_msft, "JPM"),
+  "BAC -> JPM" = spill_test(crisis_jpm, "BAC"),
+  "BAC -> MSFT" = spill_test(crisis_msft, "BAC"),
+  "MSFT -> JPM" = spill_test(crisis_jpm, "MSFT"),
+  "MSFT -> BAC" = spill_test(crisis_bac, "MSFT")
+  )
+
+
+# 4. Estimate M-HAR Equations for the NON-CRISIS Period (Including MSFT)
+cat("\n================ NON-CRISIS PERIOD M-HAR (2011-2019) ================\n")
+noncrisis_jpm <- lm(JPM_RR ~ JPM_d + JPM_w + JPM_m + BAC_d + BAC_w + BAC_m + MSFT_d + MSFT_w + MSFT_m, data = m_har_noncrisis)
+noncrisis_bac <- lm(BAC_RR ~ JPM_d + JPM_w + JPM_m + BAC_d + BAC_w + BAC_m + MSFT_d + MSFT_w + MSFT_m, data = m_har_noncrisis)
+noncrisis_msft <- lm(MSFT_RR ~ JPM_d + JPM_w + JPM_m + BAC_d + BAC_w + BAC_m + MSFT_d + MSFT_w + MSFT_m, data = m_har_noncrisis)
+
+print("--- JPM Non-Crisis Spillovers ---")
+print(coeftest(noncrisis_jpm, vcov = NeweyWest(noncrisis_jpm, lag = 5)))
+
+print("--- BAC Non-Crisis Spillovers ---")
+print(coeftest(noncrisis_bac, vcov = NeweyWest(noncrisis_bac, lag = 5)))
+
+print("--- MSFT Non-Crisis Spillovers ---")
+print(coeftest(noncrisis_msft, vcov = NeweyWest(noncrisis_msft, lag = 5)))
+
+noncrisis_tests <- c(
+  "JPM -> BAC" = spill_test(noncrisis_bac, "JPM"),
+  "JPM -> MSFT" = spill_test(noncrisis_msft, "JPM"),
+  "BAC -> JPM" = spill_test(noncrisis_jpm, "BAC"),
+  "BAC -> MSFT" = spill_test(noncrisis_msft, "BAC"),
+  "MSFT -> JPM" = spill_test(noncrisis_jpm, "MSFT"),
+  "MSFT -> BAC" = spill_test(noncrisis_bac, "MSFT")
+  )
+spill_table <- round(cbind(Full = full_tests, Crisis = crisis_tests, NonCrisis = noncrisis_tests), 4)
+print(spill_table)
+```
+```{r}
+cor(cbind(JPM = resid(crisis_jpm), BAC = resid(crisis_bac), MSFT = resid(crisis_msft)))
+cor(cbind(JPM = resid(noncrisis_jpm), BAC = resid(noncrisis_bac), MSFT = resid(noncrisis_msft)))
+```
+Across both regimes we see the weekly dominance again.
+
+During crises MSFT affects JPM, non crises BAC affects JPM.
+
+The comparison reveals regime-dependent spillover pathways: during
+structural crises, high-frequency banking shocks (JPM $\rightarrow$ BAC)
+and broad market panic (MSFT $\rightarrow$ JPM) intensify, whereas
+calmer periods exhibit more localized or cross-sector baseline
+interactions.
